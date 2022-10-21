@@ -22,7 +22,9 @@
 #include <string>                       // for string, char_traits, operator+
 #include <unordered_map>                // for unordered_map
 #include <vector>                       // for vector
+#include "sstable.h"
 class sstable_statistics_t;             // lines 31-31
+
 namespace arrow
 {
 class MemoryPool;
@@ -44,6 +46,22 @@ arrow::Result<std::shared_ptr<arrow::Table>> vector_to_columnar_table(
 
     // finish the arrays and store them into a vector
     return helper->to_table();
+}
+
+arrow::Result<std::shared_ptr<arrow::Schema>> common_arrow_schema(
+    const std::vector<std::shared_ptr<sstable_t>>& tables
+) {
+
+    std::vector<std::shared_ptr<arrow::Schema>> schemas(tables.size());
+
+    for (int i = 0; i < schemas.size(); ++i) {
+        const auto& statistics = tables[i]->statistics();
+        ARROW_ASSIGN_OR_RAISE(auto helper, conversion_helper_t::create(statistics));
+        // TODO: Maybe need to init too?
+        schemas[i] = helper->schema();
+    }
+
+    return arrow::UnifySchemas(schemas);
 }
 
 arrow::Status process_partition(const std::unique_ptr<sstable_data_t::partition_t> &partition,

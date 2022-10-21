@@ -3,6 +3,7 @@
 #include <arrow/io/file.h>        // for FileOutputStream
 #include <arrow/io/memory.h>      // for BufferOutputStream
 #include <arrow/ipc/writer.h>     // for RecordBatchWriter, WriteStats, Mak...
+#include <arrow/memory_pool.h>    // For MemoryPool
 #include <arrow/result.h>         // for ARROW_ASSIGN_OR_RAISE, Result
 #include <arrow/table.h>          // for ConcatenateTables, ConcatenateTabl...
 #include <netinet/in.h>           // for sockaddr_in, htons, INADDR_ANY
@@ -107,6 +108,38 @@ arrow::Status send_table(std::shared_ptr<arrow::Table> table, int cli_sockfd)
     return arrow::Status::OK();
 }
 
+arrow::Status write_parquet(const std::string &path, std::shared_ptr<arrow::RecordBatchReader> reader,
+                            arrow::MemoryPool *pool)
+{
+    using parquet::ArrowWriterProperties;
+    using parquet::WriterProperties;
+    
+    // Choose compression
+    std::shared_ptr<WriterProperties> props =
+        WriterProperties::Builder().compression(arrow::Compression::SNAPPY)->build();
+
+    // Opt to store Arrow schema for easier reads back into Arrow
+    std::shared_ptr<ArrowWriterProperties> arrow_props = ArrowWriterProperties::Builder().store_schema()->build();
+
+    // Create a writer
+    std::shared_ptr<arrow::io::FileOutputStream> outfile;
+    ARROW_ASSIGN_OR_RAISE(outfile, arrow::io::FileOutputStream::Open(path));
+    std::unique_ptr<parquet::arrow::FileWriter> writer;
+    ARROW_RETURN_NOT_OK(
+        parquet::arrow::FileWriter::Open(*reader->schema().get(), pool, outfile, props, arrow_props, &writer));
+
+    // Write each batch as a row_group
+    for (arrow::Result<std::shared_ptr<arrow::RecordBatch>> maybe_batch : *reader)
+    {
+        ARROW_ASSIGN_OR_RAISE(auto batch, maybe_batch);
+        ARROW_ASSIGN_OR_RAISE(auto table, arrow::Table::FromRecordBatches(batch->schema(), {batch}));
+        ARROW_RETURN_NOT_OK(writer->WriteTable(*table.get(), batch->num_rows()));
+    }
+
+    // Write file footer and close
+    ARROW_RETURN_NOT_OK(writer->Close());
+}
+
 /**
  * @brief Write arrow data to a parquet file.
  *
@@ -115,9 +148,25 @@ arrow::Status send_table(std::shared_ptr<arrow::Table> table, int cli_sockfd)
 arrow::Status write_parquet(const std::string &path, std::vector<std::shared_ptr<arrow::Table>> tables,
                             arrow::MemoryPool *pool)
 {
+    // How much memory used used at this point
+    std::cout << "Memory prior to concatenation: " << pool->bytes_allocated() << " bytes" << std::endl;
+
+    // What are the schemas?
+    for (int i = 0; i < tables.size(); ++i)
+    {
+        std::cout << "Table " << i << " schema:\n" << tables[i]->schema()->ToString() << std::endl;
+    }
+
     arrow::ConcatenateTablesOptions options;
     options.unify_schemas = true;
     ARROW_ASSIGN_OR_RAISE(auto final_table, arrow::ConcatenateTables(tables, options));
+
+    // How much memory used used at this point?
+    std::cout << "Memory after concatenation: " << pool->bytes_allocated() << " bytes" << std::endl;
+
+    // What is the unified schema?
+    std::cout << "Combined table schema:\n" << final_table->schema()->ToString() << std::endl;
+
     std::shared_ptr<arrow::io::FileOutputStream> outfile;
     PARQUET_ASSIGN_OR_THROW(outfile, arrow::io::FileOutputStream::Open(path));
     return parquet::arrow::WriteTable(*final_table, pool, outfile, 3);
